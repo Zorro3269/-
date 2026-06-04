@@ -1,0 +1,69 @@
+#include "bsp_adc.h"
+
+// 初始化 ADC1 的通道0 (对应引脚 PA0)
+void ADC1_Init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStructure;
+    ADC_InitTypeDef ADC_InitStructure;
+
+    // 1. 开启 GPIOA 和 ADC1 的时钟
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1, ENABLE);
+    
+    // 2. 设置 ADC 时钟分频 (72MHz / 6 = 12MHz，ADC时钟不能超过14MHz)
+    RCC_ADCCLKConfig(RCC_PCLK2_Div6);
+
+    // 3. 配置 PA0 为模拟输入模式
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN; // 模拟输入
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+    // 4. 配置 ADC1 参数
+    ADC_DeInit(ADC1);
+    ADC_InitStructure.ADC_Mode = ADC_Mode_Independent;                  // 独立工作模式
+    ADC_InitStructure.ADC_ScanConvMode = DISABLE;                       // 单通道不使用扫描
+    ADC_InitStructure.ADC_ContinuousConvMode = DISABLE;                 // 单次转换模式
+    ADC_InitStructure.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None; // 软件触发转换
+    ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;              // 数据右对齐
+    ADC_InitStructure.ADC_NbrOfChannel = 1;                             // 转换通道数量为1
+    ADC_Init(ADC1, &ADC_InitStructure);
+
+    // 5. 使能 ADC1 并进行校准 (必须的步骤，保证ADC准确度)
+    ADC_Cmd(ADC1, ENABLE);
+    ADC_ResetCalibration(ADC1);
+    while(ADC_GetResetCalibrationStatus(ADC1)); 
+    ADC_StartCalibration(ADC1);
+    while(ADC_GetCalibrationStatus(ADC1)); 
+}
+
+// 核心算法：连续多次采样，获取声波的"峰峰值电压"
+float Get_Sound_Voltage(void)
+{
+    uint16_t sample_val = 0;
+    uint16_t max_val = 0;
+    uint16_t min_val = 4096; // 12位ADC最大值是4095，初始设为最大
+    uint16_t i;
+    
+    // 设置读取通道为 ADC1_Channel_0 (即PA0)
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_0, 1, ADC_SampleTime_55Cycles5);
+
+    // 在极短的时间内连续高速采样 1000 次 (捕获声波的波形)
+    for(i = 0; i < 1000; i++)
+    {
+        ADC_SoftwareStartConvCmd(ADC1, ENABLE);                 // 触发一次ADC转换
+        while(!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC));          // 等待转换完成
+        sample_val = ADC_GetConversionValue(ADC1);              // 读取数值
+        
+        // 记录波峰和波谷
+        if(sample_val > max_val) max_val = sample_val;
+        if(sample_val < min_val) min_val = sample_val;
+    }
+
+    // 计算峰峰值差值 (代表声音的振幅/响度)
+    uint16_t diff = max_val - min_val;
+
+    // 转换为实际电压值返回 (参考电压3.3V，12位精度4095)
+    // 加上一个小小的本底噪声滤除：如果差值太小，当做0V处理
+    if (diff < 15) return 0.0; 
+
+    return ((float)diff / 4095.0) * 3.3;
+}
